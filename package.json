@@ -1,0 +1,19 @@
+{
+  "name": "bahn-angebote",
+  "version": "1.0.0",
+  "description": "Sucht günstige Direktverbindungen Freiburg Hbf <-> Berlin Hbf auf bahn.de (1. und 2. Klasse) und mailt Angebote bis 30 €",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "check": "node check.js",
+    "check:test": "node check.js --dry-run",
+    "api": "node server.js"
+  },
+  "dependencies": {
+    "db-vendo-client": "^6.8.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "nodemailer": "^6.9.15"
+  }
+}
