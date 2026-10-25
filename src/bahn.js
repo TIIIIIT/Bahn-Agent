@@ -1,9 +1,13 @@
 import { createClient } from 'db-vendo-client'
 import { profile as dbwebProfile } from 'db-vendo-client/p/dbweb/index.js'
+import { profile as dbnavProfile } from 'db-vendo-client/p/dbnav/index.js'
 import { config, STATIONEN } from './config.js'
 
-// dbweb = dieselbe Schnittstelle, die auch die Webseite bahn.de nutzt (inkl. Preise)
-const client = createClient(dbwebProfile, config.userAgent)
+// Zwei Schnittstellen:
+//  dbnav = DB-Navigator-App (Standard, wird von Servern seltener blockiert)
+//  dbweb = Webseite bahn.de (mit Tages-Bestpreissuche)
+const PROFIL = (process.env.DB_PROFIL || 'dbnav').toLowerCase()
+const client = createClient(PROFIL === 'dbweb' ? dbwebProfile : dbnavProfile, config.userAgent)
 
 const pause = ms => new Promise(r => setTimeout(r, ms))
 
@@ -56,13 +60,32 @@ function zuAngebot(journey, { von, nach, key }, klasse) {
 
 // Günstigste Direktverbindungen eines Tages in einer Richtung und Klasse
 export async function sucheTag(richtung, datum, klasse) {
-  const res = await client.journeys(richtung.von.id, richtung.nach.id, {
-    departure: new Date(`${datum}T00:00:00`),
-    transfers: 0,
-    firstClass: klasse === 1,
-    bestprice: true, // Bestpreissuche über den ganzen Tag
-  })
-  return (res.journeys || [])
+  const basis = { transfers: 0, firstClass: klasse === 1 }
+  let journeys = []
+
+  if (PROFIL === 'dbweb') {
+    const res = await client.journeys(richtung.von.id, richtung.nach.id, {
+      ...basis,
+      departure: new Date(`${datum}T00:00:00`),
+      bestprice: true, // Bestpreissuche über den ganzen Tag
+    })
+    journeys = res.journeys || []
+  } else {
+    // Den Tag seitenweise durchgehen, bis die Abfahrten am nächsten Tag liegen
+    let res = await client.journeys(richtung.von.id, richtung.nach.id, {
+      ...basis,
+      departure: new Date(`${datum}T00:00:00`),
+    })
+    for (let seite = 0; seite < 6; seite++) {
+      const amTag = (res.journeys || []).filter(j => (j.legs[0].plannedDeparture || '').startsWith(datum))
+      journeys.push(...amTag)
+      if (!res.laterRef || amTag.length < (res.journeys || []).length) break
+      await pause(config.pauseMs)
+      res = await client.journeys(richtung.von.id, richtung.nach.id, { ...basis, laterThan: res.laterRef })
+    }
+  }
+
+  return journeys
     .filter(istDirekt)
     .filter(j => j.price && typeof j.price.amount === 'number')
     .map(j => zuAngebot(j, richtung, klasse))
@@ -89,14 +112,23 @@ export async function sucheAlle({
 } = {}) {
   const ergebnisse = []
   const fehler = []
+  let fehlerInFolge = 0
+  log(`Schnittstelle: ${PROFIL}`)
+  suche:
   for (const datum of datumListe(tage)) {
     for (const richtung of richtungen) {
       for (const klasse of klassen) {
         try {
           ergebnisse.push(...await sucheTag(richtung, datum, klasse))
+          fehlerInFolge = 0
         } catch (err) {
+          fehlerInFolge++
           fehler.push({ datum, richtung: richtung.key, klasse, fehler: err.message })
           log(`Fehler ${datum} ${richtung.key} ${klasse}. Kl.: ${err.message}`)
+          if (fehlerInFolge >= 8) {
+            log('Abbruch: Die Bahn lehnt alle Anfragen ab (vermutlich blockiert).')
+            break suche
+          }
         }
         await pause(config.pauseMs)
       }
